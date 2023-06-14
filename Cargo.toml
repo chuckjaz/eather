@@ -10,7 +10,9 @@ async-trait = "0.1.68"
 base-x = "0.2.11"
 bytes = "1.4.0"
 chrono = { version = "0.4.26", features = ["serde"] }
+fuser = "0.12.0"
 futures = "0.3.28"
+object_store = { version = "0.6.1", features = ["serde"] }
 rmp-serde = "1.1.1"
 serde = { version = "1.0.164", features = ["derive"] }
 tokio = "1.28.2"
