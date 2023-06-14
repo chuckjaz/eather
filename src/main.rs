@@ -3,8 +3,8 @@ use crate::result::Result;
 
 mod content;
 mod content_provider;
-mod result;
 mod object_store_provider;
+mod result;
 
 fn main() -> Result<()> {
     let arg: Vec<_> = std::env::args().collect();

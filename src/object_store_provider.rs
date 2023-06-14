@@ -1,20 +1,25 @@
-use bytes::Bytes;
-use futures::{StreamExt, stream::{Stream, BoxStream}};
-use object_store::{ObjectStore, path::Path};
+use crate::{
+    content::Id,
+    content_provider::{ByteStream, ContentProvider, ContentStore},
+    result::Result,
+};
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::{
+    stream::{BoxStream, Stream},
+    StreamExt,
+};
+use object_store::{path::Path, ObjectStore};
 use tokio::io::AsyncWrite;
-use crate::{content_provider::{ContentProvider, ByteStream, ContentStore}, result::Result, content::Id};
 
 #[derive(Debug)]
 pub struct ObjectStoreProvider<Store: ObjectStore> {
-    store: Store
+    store: Store,
 }
 
 impl<Store: ObjectStore> ObjectStoreProvider<Store> {
     pub fn new(store: Store) -> Self {
-        return Self {
-            store
-        }
+        return Self { store };
     }
 }
 
@@ -33,7 +38,7 @@ impl<Store: ObjectStore> ContentProvider for ObjectStoreProvider<Store> {
         let result = self.store.head(&path).await;
         match result {
             Ok(_) => Ok(true),
-            _ => Ok(false)
+            _ => Ok(false),
         }
     }
 
@@ -64,6 +69,8 @@ async fn convert_error<T>(e: object_store::Result<T>) -> Result<T> {
     Ok(e?)
 }
 
-fn convert_to_stream(stream: BoxStream<object_store::Result<Bytes>>) -> impl Stream<Item = Result<Bytes>> + '_ {
+fn convert_to_stream(
+    stream: BoxStream<object_store::Result<Bytes>>,
+) -> impl Stream<Item = Result<Bytes>> + '_ {
     stream.then(|e| convert_error(e))
 }
