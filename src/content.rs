@@ -6,13 +6,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 pub type Date = DateTime<Utc>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum Id {
-    Sha256([u8; 32]),
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Slot {
     Ed25519PublicKey([u8; 32]),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Authorization {
+    Ed25519Token([u8; 32]),
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Id {
+    Sha256([u8; 32]),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Description {
     pub id: Id,
     pub size: u64,
@@ -21,16 +30,7 @@ pub struct Description {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Content {
     Described(Description),
-    Node(Id),
-}
-
-impl Content {
-    pub fn id(&self) -> Id {
-        match self {
-            Content::Described(description) => description.id,
-            Content::Node(id) => *id,
-        }
-    }
+    Node(Slot),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -85,8 +85,17 @@ impl Id {
     pub fn id_string(&self) -> String {
         encode_base58(match self {
             Id::Sha256(bytes) => bytes,
-            Id::Ed25519PublicKey(bytes) => bytes,
         })
+    }
+}
+
+impl Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519PublicKey(bytes) => {
+                f.write_fmt(format_args!("Ed25519({})", encode_base58(bytes)))
+            }
+        }
     }
 }
 
@@ -94,9 +103,6 @@ impl Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sha256(bytes) => f.write_fmt(format_args!("Sha256({})", encode_base58(bytes))),
-            Self::Ed25519PublicKey(bytes) => {
-                f.write_fmt(format_args!("Ed25519({})", encode_base58(bytes)))
-            }
         }
     }
 }

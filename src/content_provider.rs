@@ -1,4 +1,4 @@
-use crate::content::Id;
+use crate::content::{Authorization, Id, Slot, Description};
 use crate::result::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -12,10 +12,15 @@ pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 pub trait ContentProvider {
     async fn get(&self, id: Id) -> Result<ByteStream>;
     async fn has(&self, id: Id) -> Result<bool>;
-    async fn current(&self, id: Id) -> Result<Id>;
 }
 
 #[async_trait]
 pub trait ContentStore {
     async fn put(&self, id: Id) -> Result<Box<dyn AsyncWrite + Unpin + Send>>;
+}
+
+#[async_trait]
+pub trait SlotHolder {
+    async fn current(&self, slot: Slot) -> Result<Description>;
+    async fn update(&self, slot: Slot, dscription: Description, authorization: Authorization) -> Result<()>;
 }

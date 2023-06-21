@@ -41,10 +41,6 @@ impl<Store: ObjectStore> ContentProvider for ObjectStoreProvider<Store> {
             _ => Ok(false),
         }
     }
-
-    async fn current(&self, id: Id) -> Result<Id> {
-        Ok(id)
-    }
 }
 
 #[async_trait]
