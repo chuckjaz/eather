@@ -1,4 +1,4 @@
-use crate::content::{Authorization, Id, Slot, Description};
+use crate::content::{Id, Slot, Description};
 use crate::result::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,5 +22,5 @@ pub trait ContentStore {
 #[async_trait]
 pub trait SlotHolder {
     async fn current(&self, slot: Slot) -> Result<Description>;
-    async fn update(&self, slot: Slot, dscription: Description, authorization: Authorization) -> Result<()>;
+    async fn update(&self, slot: Slot, description: Description) -> Result<()>;
 }

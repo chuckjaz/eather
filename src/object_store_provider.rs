@@ -1,6 +1,6 @@
 use crate::{
-    content::Id,
-    content_provider::{ByteStream, ContentProvider, ContentStore},
+    content::{Id, Slot, Description},
+    content_provider::{ByteStream, ContentProvider, ContentStore, SlotHolder},
     result::Result,
 };
 use async_trait::async_trait;
@@ -52,12 +52,40 @@ impl<Store: ObjectStore> ContentStore for ObjectStoreProvider<Store> {
     }
 }
 
+#[async_trait]
+impl<Store: ObjectStore> SlotHolder for ObjectStoreProvider<Store> {
+    async fn current(&self, slot: Slot) -> Result<Description> {
+        log::info!("SlotHolder::current({slot:?}");
+        let path = slot_path(slot);
+        let result = self.store.get(&path).await?;
+        let bytes = result.bytes().await?;
+        Ok(rmp_serde::decode::from_slice(&bytes[..])?)
+    }
+
+    async fn update(&self, slot: Slot, description: Description) -> Result<()> {
+        let path = slot_path(slot);
+        let bytes = rmp_serde::encode::to_vec(&description)?;
+        let bytes = Bytes::from(bytes);
+        self.store.put(&path, bytes).await?;
+        Ok(())
+    }
+}
+
 fn content_path(id: Id) -> Path {
     let name = id.id_string();
     let first: String = name.chars().take(2).collect();
     let second: String = name.chars().skip(2).take(2).collect();
     let last: String = name.chars().skip(4).collect();
 
+    Path::from(first).child(second).child(last)
+}
+
+fn slot_path(slot: Slot) -> Path {
+    let name: String = slot.slot_string();
+    let first: String = name.chars().take(2).collect();
+    let second: String = name.chars().skip(2).take(2).collect();
+    let last: String = name.chars().skip(4).collect();
+    
     Path::from(first).child(second).child(last)
 }
 

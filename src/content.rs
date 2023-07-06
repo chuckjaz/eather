@@ -1,4 +1,4 @@
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Write};
 
 use crate::result::Result;
 use base_x::{decode, encode};
@@ -6,19 +6,58 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 pub type Date = DateTime<Utc>;
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Slot {
     Ed25519PublicKey([u8; 32]),
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
-pub enum Authorization {
-    Ed25519Token([u8; 32]),
+impl std::fmt::Debug for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519PublicKey(key) =>  f.write_fmt(format_args!("PublicKey({})", encode_base58(key)))?
+        };
+        Ok(())
+    }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
+impl Slot {
+    pub fn ed25519(bytes: &[u8; 32]) -> Slot {
+        Slot::Ed25519PublicKey(*bytes)
+    }
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
+pub enum SlotOwner {
+    Ed25519PrivateKey([u8; 32]),
+}
+
+impl std::fmt::Debug for SlotOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519PrivateKey(key) =>  f.write_fmt(format_args!("PrivateKey({})", encode_base58(key)))?
+        };
+        Ok(())
+    }
+}
+
+impl SlotOwner {
+    pub fn ed25519(bytes: &[u8; 32]) -> SlotOwner {
+        SlotOwner::Ed25519PrivateKey(*bytes)
+    }
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Id {
     Sha256([u8; 32]),
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sha256(key) =>  f.write_fmt(format_args!("Sha({})", encode_base58(key)))?
+        };
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -89,6 +128,28 @@ impl Id {
     }
 }
 
+impl Slot {
+    pub fn slot_string(&self) -> String {
+        encode_base58(match self {
+            Slot::Ed25519PublicKey(bytes) => bytes
+        })
+    }
+
+    pub fn from_string(str: &str) -> Result<Self> {
+        let bytes = decode_base58(str)?;
+        Ok(Self::from_slice(&bytes[..]))
+    }
+
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        assert!(bytes.len() == 32);
+        let mut b: [u8; 32] = [0; 32];
+        for (dst, src) in b.iter_mut().zip(bytes) {
+            *dst = *src;
+        }
+        Self::Ed25519PublicKey(b)
+    }
+}
+
 impl Display for Slot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -120,7 +181,7 @@ impl Display for Content {
 
 const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-fn encode_base58(bytes: &[u8]) -> String {
+pub fn encode_base58(bytes: &[u8]) -> String {
     encode(BASE58, bytes)
 }
 

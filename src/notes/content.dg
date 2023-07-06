@@ -1,0 +1,89 @@
+value Directory {
+    entries: List<DirectoryEntry>
+}
+
+type DirectoryEntry = File | Directory
+
+type File = new EntryInformation
+type Directory = new EntryInformation
+
+value EntryInformation {
+    name: String
+    modifyTime: Date
+    content: Content
+    executable: Boolean
+}
+
+type Content = Description | Slot
+
+value Description {
+    id: Id
+    size: u64
+}
+
+type Id = Sha256
+type Slot = Ed25519PublicKey
+type Authorization = Ed25519Token
+
+value Ed25519PublicKey {
+    bytes: u8[32]
+
+    FromBytes
+    TryFromString
+    DisplayBytes(name = "Ed25519PublicKey")
+}
+
+value Ed25519Token {
+    bytes: u8[32]
+
+    FromBytes
+    TryFromString
+    DisplayBytes(name = "Ed25519Token")
+}
+
+value Sha256 {
+    bytes: u8[32]
+    
+    FromBytes
+    TryFromString
+    DisplayBytes(name = "Sha256")
+}
+
+
+type BytesWrapper {
+    let size: usize = infer
+    value Self { bytes: u8[size] }
+}
+
+trait FromBytes {
+    BytesWrapper
+    From<u8[size]> {
+        fun from(move bytes: u8[size]) = Self { bytes: move bytes }
+    }
+}
+
+trait TryFromString {
+    BytesWrapper
+    TryFrom<String> {
+        fun from(move value: String) = decode(move value).into()
+    }
+}
+
+trait DisplayBytes {
+    BytesWrapper
+    let name: String
+
+    Display {
+        fun format(formatter: Formatter)? {
+            formatter.write("{name}({encode(bytes)?})")
+        }
+    }
+}
+
+fun deocde(move value: String): move u8[32]? {
+    decode(BASE58, value)?.tryInto()
+}
+
+fun encode(bytes: u8[])? {
+    encode(BASE58, bytes)?
+}
