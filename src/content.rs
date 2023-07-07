@@ -1,4 +1,4 @@
-use std::fmt::{self, Display, Write};
+use std::fmt::{self, Display};
 
 use crate::result::Result;
 use base_x::{decode, encode};
@@ -90,15 +90,6 @@ pub struct EntryInformation {
 pub enum DirectoryEntry {
     File(EntryInformation),
     Directory(EntryInformation),
-}
-
-impl DirectoryEntry {
-    pub fn info(&self) -> EntryInformation {
-        match self {
-            DirectoryEntry::File(info) => info.clone(),
-            DirectoryEntry::Directory(info) => info.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

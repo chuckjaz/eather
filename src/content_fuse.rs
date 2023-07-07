@@ -140,20 +140,6 @@ impl ContentFuse {
         })
     }
 
-    async fn resolve_description(&mut self, info: &mut NodeContentInformation) -> crate::result::Result<Description> {
-        let key = &info.key;
-        match key {
-            NodeContentKey::Id(id) => {
-                info.ttl = end_of_time();
-                Ok(info.description.clone().unwrap())
-            },
-            NodeContentKey::Slot(slot) => {
-                info.ttl = now() + SLOT_TTL;
-                Ok(self.actor.get_slot(*slot).await?)
-            }
-        }
-    }
-
     fn inode_of_id(&mut self, id: Id) -> INode {
         if let Some(inode) = self.id_to_inode.get(&id) {
             *inode
