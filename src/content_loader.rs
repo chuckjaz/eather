@@ -1,4 +1,4 @@
-use std::{ffi::OsString, path::{Path, PathBuf}, fs::{self, File, DirEntry}, io::{BufReader, Read}, os::unix::prelude::PermissionsExt};
+use std::{ffi::OsString, path::Path, fs::{self, File, DirEntry}, io::{BufReader, Read}, os::unix::prelude::PermissionsExt};
 use async_recursion::async_recursion;
 use bytes::{Bytes, Buf};
 use ed25519_dalek::Keypair;
@@ -8,7 +8,7 @@ use ring::digest::{Context, SHA256, Digest};
 use log::info;
 use tokio::io::AsyncWriteExt;
 
-use crate::{result::Result, object_store_provider::{self, ObjectStoreProvider}, content::{DirectoryEntry, Directory, EntryInformation, Content, Description, Id, Slot, SlotOwner}, content_provider::{ContentStore, SlotHolder}};
+use crate::{result::Result, object_store_provider::ObjectStoreProvider, content::{DirectoryEntry, Directory, EntryInformation, Content, Description, Id, Slot, SlotOwner}, content_provider::{ContentStore, SlotHolder}};
 
 async fn directory_of(path: &Path, store: &(impl ContentStore + Sync + Send)) -> Result<Content> {
     let mut entries: Vec<DirectoryEntry> = Vec::new();
@@ -23,7 +23,7 @@ async fn directory_of(path: &Path, store: &(impl ContentStore + Sync + Send)) ->
     let sha = sha256_of_buffer(bytes);
     let id = Id::from_sha256(sha.as_ref());
     let content = Content::Described(
-        Description { id, size: bytes.len() as u64 }
+        Description { id, size: bytes.len() as i64 }
     );
     let mut writer = store.put(id).await?;
     writer.write(bytes).await?;
@@ -50,7 +50,7 @@ async fn directory_entry_of_entry(entry: &DirEntry, store: &(impl ContentStore +
         let sha = sha256_of_buffer(bytes);
         let id = Id::from_sha256(sha.as_ref());
         let content = Content::Described(
-            Description { id, size: bytes.len() as u64 }
+            Description { id, size: bytes.len() as i64 }
         );
         let mut writer = store.put(id).await?;
         writer.write(bytes).await?;
@@ -98,9 +98,9 @@ fn sha256_of_buffer(buf: &[u8]) -> Digest {
     context.finish()
 }
 
-fn sha256_of_file(path: &Path) -> Result<(Id, u64)> {
+fn sha256_of_file(path: &Path) -> Result<(Id, i64)> {
     let input = File::open(path)?;
-    let size = input.metadata()?.len();
+    let size = input.metadata()?.len().try_into().unwrap();
     let reader = BufReader::new(input);
     let digest = sha256_digest(reader)?;
     let id = Id::from_sha256(digest.as_ref());

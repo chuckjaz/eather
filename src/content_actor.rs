@@ -3,6 +3,7 @@ use std::sync::Arc;
 use bytes::{BytesMut, BufMut};
 use futures::StreamExt;
 use log::info;
+use tokio::io::AsyncWrite;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
 
@@ -39,6 +40,10 @@ enum ContentActorMessage {
     GetStream {
         id: Id,
         response: oneshot::Sender<Result<ByteStream>>,
+    },
+    Put {
+        id: Id,
+        response: oneshot::Sender<Result<Box<dyn AsyncWrite + Unpin + Send>>>,
     }
 }
 
@@ -48,7 +53,8 @@ impl std::fmt::Debug for ContentActorMessage {
             Self::GetSlot { slot , response : _} => f.write_fmt(format_args!("GetSlot(slot: {slot:?})"))?,
             Self::UpdateSlot { slot, description , response: _ } => f.write_fmt(format_args!("UpdateSlot(slot: {slot:?}, description: {description:?})"))?,
             Self::GetDirectory { id, response: _ } => f.write_fmt(format_args!("GetDirectory(id: {id:?})"))?,
-            Self::GetStream { id, response: _ } => f.write_fmt(format_args!("GetStream(id: {id:?})"))?
+            Self::GetStream { id, response: _ } => f.write_fmt(format_args!("GetStream(id: {id:?})"))?,
+            Self::Put { id, response: _ } => f.write_fmt(format_args!("Put(id: {id:?})"))?,
         };
         Ok(())
     }
@@ -93,6 +99,10 @@ impl<Provider: ContentProvider, Store: ContentStore, Slots: SlotHolder>
             ContentActorMessage::GetStream { id, response } => {
                 let result = self.get_stream(id).await;
                 let _ = response.send(result);
+            },
+            ContentActorMessage::Put { id, response } => {
+                let result = self.put(id).await;
+                let _ = response.send(result);
             }
         }
     }
@@ -110,6 +120,11 @@ impl<Provider: ContentProvider, Store: ContentStore, Slots: SlotHolder>
     async fn get_stream(&mut self, id: Id) -> Result<ByteStream> {
         info!("ContentActor::get_stream: id: {id:?}");
         Ok(self.provider.get(id).await?)
+    }
+
+    async fn put(&mut self, id: Id) -> Result<Box<dyn AsyncWrite + Unpin + Send>> {
+        info!("ContentActor::put: id: {id:?}");
+        Ok(self.store.put(id).await?)
     }
 }
 
@@ -137,11 +152,24 @@ impl ContentActorHandle {
         store: Store,
         slots: Slots,
     ) -> Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        Ok(Self::new_rt(provider, store, slots, Arc::new(rt)))
+    }
+
+    pub fn new_rt<
+        Provider: ContentProvider + Send + Sync + 'static,
+        Store: ContentStore + Send + Sync + 'static,
+        Slots: SlotHolder + Send + Sync + 'static,
+    >(
+        provider: Provider,
+        store: Store,
+        slots: Slots,
+        runtime: Arc<Runtime>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(8);
         let actor = ContentActor::new(provider, store, slots, receiver);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        rt.spawn(run_actor(actor));
-        Ok(Self { sender, rt: Arc::new(rt) })
+        runtime.spawn(run_actor(actor));
+        Self { sender, rt: runtime }
     }
 
     pub fn runtime(&self) -> Arc<Runtime> {
@@ -185,5 +213,12 @@ impl ContentActorHandle {
         let message = ContentActorMessage::GetStream { id, response: send };
         let _ = self.sender.send(message).await;
         receive.await.expect("Actor has been killed")   
+    }
+
+    pub async fn put(&self, id: Id) -> Result<Box<dyn AsyncWrite + Unpin + Send>> {
+        let (send, receive) = oneshot::channel();
+        let message = ContentActorMessage::Put { id, response: send };
+        let _ = self.sender.send(message).await;
+        receive.await.expect("Actore has been killed")
     }
 }

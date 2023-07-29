@@ -1,12 +1,12 @@
 use std::{
     collections::HashMap,
-    ffi::{OsString, OsStr}, sync::Arc, time::{SystemTime, Duration}, vec,
+    ffi::{OsString, OsStr}, sync::Arc, time::{SystemTime, Duration},
 };
 
 use bytes::{Bytes, BytesMut, BufMut};
 use fuser::{Filesystem, FileAttr, FileType};
 use futures::StreamExt;
-use libc::ENOENT;
+use libc::{ENOENT, ENOSYS};
 use log::info;
 
 use crate::{
@@ -17,7 +17,6 @@ use crate::{
 
 const DIRECTORY_CHUNK_SIZE: usize = 1024;
          
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct INode {
     id: u64,
@@ -277,7 +276,7 @@ impl ContentFuse {
     }
 
     fn info_to_file_attr(info: &NodeContentInformation, req: &fuser::Request<'_>) -> FileAttr {
-        let size = info.description.and_then(|d| { Some(d.size) }).unwrap_or(0u64);
+        let size = info.description.and_then(|d| { Some(d.size) }).unwrap_or(0i64);
         let kind = match info.kind {
             NodeContentKind::Directory => FileType::Directory,
             NodeContentKind::File => FileType::RegularFile
@@ -289,7 +288,7 @@ impl ContentFuse {
         };
         FileAttr {
             ino: info.inode.id,
-            size, 
+            size: size.try_into().unwrap(), 
             blocks: 1, 
             atime: now(), 
             mtime: info.mtime, 
@@ -464,6 +463,54 @@ impl Filesystem for ContentFuse {
             }
         }
         reply.ok();
+     }
+
+     fn write(
+             &mut self,
+             _req: &fuser::Request<'_>,
+             ino: u64,
+             fh: u64,
+             offset: i64,
+             _data: &[u8],
+             write_flags: u32,
+             flags: i32,
+             _lock_owner: Option<u64>,
+             reply: fuser::ReplyWrite,
+        ) {
+        info!("ContentFuse::Filesystem::write(ino={ino}, fh={fh}, offset={offset}, write_flags={write_flags:#o}, flags={flags:#o})");    
+        reply.error(ENOSYS);
+     }
+
+     fn mknod(
+             &mut self,
+             _req: &fuser::Request<'_>,
+             parent: u64,
+             name: &OsStr,
+             mode: u32,
+             umask: u32,
+             _rdev: u32,
+             reply: fuser::ReplyEntry,
+        ) {
+        info!("ContentFuse::Filesystem::mknod(parent={parent}, name={name:?}, mode={mode:#o}, umask={umask:#o})");    
+        reply.error(ENOSYS);             
+     }
+
+     fn mkdir(
+             &mut self,
+             _req: &fuser::Request<'_>,
+             parent: u64,
+             name: &OsStr,
+             mode: u32,
+             umask: u32,
+             reply: fuser::ReplyEntry,
+         ) {
+        info!("ContentFuse::Filesystem::mkdir(parent={parent}, name={name:?}, mode={mode:#o}, umask={umask:#o})");    
+        reply.error(ENOSYS);                          
+     }
+
+     fn rmdir(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        info!("ContentFuse::Filesystem::rmdir(parent={parent}, name={name:?})");    
+        reply.error(ENOSYS);                          
      }
 
 }

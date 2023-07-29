@@ -1,4 +1,4 @@
-use std::fmt::{self, Display};
+use std::{fmt::{self, Display}, cmp::Ordering};
 
 use crate::result::Result;
 use base_x::{decode, encode};
@@ -51,6 +51,18 @@ pub enum Id {
     Sha256([u8; 32]),
 }
 
+impl Id {
+    #[cfg(test)]
+    pub fn sha256(value: &str) -> Result<Self> {
+        let val = decode_base58(value)?;
+        let mut bytes: [u8; 32] = [0; 32];
+        for i in 0..32 {
+            bytes[i] = val[i];
+        }
+        Ok(Self::Sha256(bytes))
+    }
+}
+
 impl std::fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -63,7 +75,7 @@ impl std::fmt::Debug for Id {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Description {
     pub id: Id,
-    pub size: u64,
+    pub size: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,6 +102,23 @@ pub struct EntryInformation {
 pub enum DirectoryEntry {
     File(EntryInformation),
     Directory(EntryInformation),
+}
+
+impl DirectoryEntry {
+    pub fn info(&self) -> &EntryInformation {
+        match self {
+            DirectoryEntry::File(info) => info,
+            DirectoryEntry::Directory(info) => info,
+        }
+    }
+
+    pub fn compare(&self, other: &DirectoryEntry) -> Ordering {
+        let a_info = self.info();
+        let b_info = other.info();
+        if a_info.name < b_info.name { Ordering::Less }
+        else if a_info.name == b_info.name { Ordering::Equal }
+        else { Ordering::Greater }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

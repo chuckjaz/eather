@@ -21,8 +21,13 @@ home = "0.5.5"
 libc = "0.2.146"
 log = "0.4.19"
 object_store = { version = "0.6.1", features = ["serde"] }
+parking_lot = "0.12.1"
 rand = "0.7.3"
 ring = "0.16.20"
 rmp-serde = "1.1.1"
 serde = { version = "1.0.164", features = ["derive"] }
 tokio = { version = "1.28.2", features = ["macros", "rt-multi-thread"] }
+tokio-stream = "0.1.14"
+
+[dev-dependencies]
+tokio-test = "*"

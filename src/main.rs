@@ -14,9 +14,11 @@ use home::home_dir;
 
 mod content;
 mod content_actor;
+mod content_file_layer;
 mod content_fuse;
 mod content_loader;
 mod content_provider;
+mod memory_provider;
 mod object_store_provider;
 mod result;
 
