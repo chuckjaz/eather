@@ -20,6 +20,7 @@ pub struct MemoryProvider {
 }
 
 impl MemoryProvider {
+    #[allow(unused)]
     pub fn new() -> MemoryProvider {
         Self {
             table: Arc::new(RwLock::new(HashMap::new())),

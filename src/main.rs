@@ -1,11 +1,13 @@
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::Arc;
 
-use content_fuse::ContentFuse;
 use ed25519_dalek::Keypair;
 use object_store::local::LocalFileSystem;
 use rand::rngs::OsRng;
 use crate::content::{Slot, encode_base58};
+use crate::content_actor::ContentActorHandle;
+use crate::content_fuse::FileContentFuse;
 use crate::content_loader::load_directory;
 use crate::result::Result;
 use env_logger::Env;
@@ -68,7 +70,14 @@ fn start_fuse(slot: String, config: OsString, path: OsString) -> Result<()> {
     let store = object_store_provider::ObjectStoreProvider::new(file_system);
     let file_system = LocalFileSystem::new_with_prefix(slot_path)?;
     let slots = object_store_provider::ObjectStoreProvider::new(file_system);
-    let content_fuse = ContentFuse::new(provider, store, slots, slot)?;
+    let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+    );
+    let actor = ContentActorHandle::new(provider, store, slots, runtime.clone());
+
+    let content_layer = crate::content_file_layer::new(actor, slot);
+    let content_fuse = FileContentFuse::new(runtime, content_layer);
     log::info!("Mount {slot:?} to {path:?}");
     fuser::mount2(content_fuse, path, &[])?;
     Ok(())    

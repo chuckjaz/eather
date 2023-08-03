@@ -122,20 +122,6 @@ fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
     Ok(context.finish())
 }
 
-async fn directory_entry_of_path(
-    path: &Path,
-    store: &(impl ContentStore + Sync + Send)
-) -> Result<Vec<DirectoryEntry>> {
-    let mut entries: Vec<DirectoryEntry> = Vec::new();
-    for dir_entry in fs::read_dir(path)? {
-        let dir_entry = dir_entry?;
-        let directory_entry = directory_entry_of_entry(&dir_entry, store).await?;
-        entries.push(directory_entry);
-    }
-    Ok(entries)
-}
-
-
 async fn slot_of_path(
     path: &Path,
     store: &(impl ContentStore + Sync + Send),

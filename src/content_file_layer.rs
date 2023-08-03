@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use log::info;
 use ring::digest::{Context, SHA256};
 use tokio::{sync::RwLock, io::{AsyncWrite, AsyncWriteExt}};
-use std::{ffi::{OsStr, OsString}, time::SystemTime, collections::{HashMap, HashSet}, sync::Arc, alloc::System, cmp::Ordering};
+use std::{ffi::{OsStr, OsString}, time::SystemTime, collections::{HashMap, HashSet}, sync::Arc};
 use futures::StreamExt;
 
 use crate::{result::Result, content::{Slot, Id, Description, Directory, DirectoryEntry, Content, EntryInformation}, content_actor::ContentActorHandle};
@@ -34,7 +34,7 @@ pub trait FileContent {
     async fn sync(&mut self, node: Node) -> Result<()>;
 }
 
-fn new(actor: ContentActorHandle, root: Slot) -> impl FileContent {
+pub fn new(actor: ContentActorHandle, root: Slot) -> impl FileContent {
     let root_info = LayerContentInformation {
         node: ROOT,
         kind: LayerContentKind::Directory,
@@ -139,7 +139,7 @@ pub struct LayerDirectory {
     pub entries: HashMap<OsString, LayerDirectoryEntry>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LayerContentInformation {
     pub node: Node,
     pub kind: LayerContentKind,
@@ -147,6 +147,15 @@ pub struct LayerContentInformation {
     pub mtime: SystemTime,
     pub ttl: SystemTime,
     pub executable: bool,
+}
+
+impl LayerContentInformation {
+    pub fn size(&self) -> i64 {
+        match &self.content {
+            Some(content) => content.size(),
+            None => 0
+        }
+    }
 }
 
 struct FileContentImpl {
@@ -356,18 +365,18 @@ impl FileContentImpl {
             };
             entries.insert(info.name.into(), layer_entry);
             self.node_to_parent.insert(node, parent);
-            let content: Option<LayerContent> = match info.content {
-                Content::Described(description) => Some(description.into()),
+            let (content, ttl) = match info.content {
+                Content::Described(description) => (Some(description.into()), end_of_time()),
                 Content::Node(slot) => {
                     self.mount_points.insert(node, slot);
-                    None
+                    (None, slot_time_to_live())
                 }
             };
             let info = LayerContentInformation {
                 node,
                 kind,
                 content,
-                ttl: now(),
+                ttl,
                 mtime: info.modify_time.into(),
                 executable: info.executable,
             };
@@ -505,7 +514,6 @@ impl FileContentImpl {
     }
 
     async fn write_content(&mut self, node: Node, content: LayerContent) -> Result<Description> {
-        let content = self.content(node).await?;
         let size = content.size();
         let mut context = Context::new(&SHA256);
         self.hash_content(&content, 0, size, &mut context).await?;
@@ -724,7 +732,6 @@ impl FileContentImpl {
 
 const SLOT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const SHA_TTL: std::time::Duration = std::time::Duration::from_secs(60 *  60 * 24 * 365);
-const ZERO: std::time::Duration = std::time::Duration::new(0u64, 0u32);
 
 fn now() -> SystemTime {
     SystemTime::now()
@@ -755,7 +762,8 @@ mod tests {
         let provider = MemoryProvider::new();
         let store = provider.clone();
         let slots = provider.clone();
-        let actor = assert_ok!(ContentActorHandle::new(provider, store, slots));
+        let runtime = new_runtime();
+        let actor = ContentActorHandle::new(provider, store, slots, runtime);
         let slot_bytes: [u8; 32] = [0; 32];
         let slot = Slot::ed25519(&slot_bytes);
         let _ = new(actor, slot);
@@ -825,7 +833,7 @@ mod tests {
         let store = memory.clone();
         let slots = memory.clone();
         let preload = memory.clone();
-        let actor = ContentActorHandle::new_rt(provider, store, slots.clone(), runtime.clone());
+        let actor = ContentActorHandle::new(provider, store, slots.clone(), runtime.clone());
         let slot_data: [u8; 32] = [0; 32];
         let slot = Slot::ed25519(&slot_data);
         store_empty_directory(&preload, &preload, slot).await;

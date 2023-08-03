@@ -136,6 +136,7 @@ impl Id {
         Id::Sha256(b)
     }
 
+    #[allow(dead_code)]
     pub fn from_string(str: &str) -> Result<Id> {
         let bytes = decode_base58(str)?;
         Ok(Self::from_sha256(&bytes[..]))
