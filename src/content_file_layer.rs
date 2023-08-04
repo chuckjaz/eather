@@ -318,7 +318,7 @@ impl FileContentImpl {
     async fn content(&mut self, node: Node) -> Result<LayerContent> {
         let info = self.info_for_node(node)?;
         if let Some(content) = info.content {
-            if info.ttl > now() {
+            if info.ttl > now() || self.invalid_nodes.get(&node).is_some() {
                 return Ok(content)
             }
         } 
@@ -341,7 +341,7 @@ impl FileContentImpl {
             return Err("Not a directory".into());
         }
 
-        if content_info.ttl > now() {
+        if content_info.ttl > now() || self.invalid_nodes.get(&parent).is_some() {
             if let Some(directory) = self.entries.get(&parent) {
                 return Ok(directory.clone())
             }
