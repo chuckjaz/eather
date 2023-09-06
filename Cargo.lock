@@ -312,6 +312,7 @@ dependencies = [
  "ring",
  "rmp-serde",
  "serde",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tokio-test",

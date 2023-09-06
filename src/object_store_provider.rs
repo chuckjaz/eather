@@ -1,6 +1,6 @@
 use crate::{
-    content::{Id, Slot, Description},
-    content_provider::{ByteStream, ContentProvider, ContentStore, SlotHolder},
+    content::{Id, Slot, SlotEntry, SlotOwner},
+    content_provider::{ByteStream, ContentProvider, ContentStore, SlotHolder, SlotOwnerStore},
     result::Result,
 };
 use async_trait::async_trait;
@@ -21,6 +21,18 @@ impl<Store: ObjectStore> ObjectStoreProvider<Store> {
     pub fn new(store: Store) -> Self {
         return Self { store };
     }
+
+    async fn store_has(&self, path: &Path) -> Result<bool> {
+        Ok(
+            match self.store.head(path).await {
+                Ok(_) => true,
+                Err(err) => match err {
+                    object_store::Error::NotFound { path: _, source: _} => false,
+                    _ => return Err(err.into())
+                }
+            }
+        )
+    }
 }
 
 #[async_trait]
@@ -35,11 +47,7 @@ impl<Store: ObjectStore> ContentProvider for ObjectStoreProvider<Store> {
 
     async fn has(&self, id: Id) -> Result<bool> {
         let path = content_path(id);
-        let result = self.store.head(&path).await;
-        match result {
-            Ok(_) => Ok(true),
-            _ => Ok(false),
-        }
+        self.store_has(&path).await
     }
 }
 
@@ -54,7 +62,7 @@ impl<Store: ObjectStore> ContentStore for ObjectStoreProvider<Store> {
 
 #[async_trait]
 impl<Store: ObjectStore> SlotHolder for ObjectStoreProvider<Store> {
-    async fn current(&self, slot: Slot) -> Result<Description> {
+    async fn current(&self, slot: Slot) -> Result<SlotEntry> {
         log::info!("SlotHolder::current({slot:?}");
         let path = slot_path(slot);
         let result = self.store.get(&path).await?;
@@ -62,9 +70,64 @@ impl<Store: ObjectStore> SlotHolder for ObjectStoreProvider<Store> {
         Ok(rmp_serde::decode::from_slice(&bytes[..])?)
     }
 
-    async fn update(&self, slot: Slot, description: Description) -> Result<()> {
+    async fn create(&self, slot: Slot, entry: SlotEntry) -> Result<()> {
+        log::info!("SlotHolder::create({slot:?}");
+        if !entry.is_valid(slot) {
+            return Err("Invalid entry for slot".into())
+        }
         let path = slot_path(slot);
-        let bytes = rmp_serde::encode::to_vec(&description)?;
+        if self.store_has(&path).await? {
+            return Err("Slot already exists".into())
+        }
+
+        let bytes = rmp_serde::encode::to_vec(&entry)?;
+        let bytes = Bytes::from(bytes);
+        self.store.put(&path, bytes).await?;
+        Ok(())
+    }
+
+    async fn update(&self, slot: Slot, entry: SlotEntry) -> Result<()> {
+        let path = slot_path(slot);
+        if !entry.is_valid(slot) {
+            return Err("Invalid entry for slot".into())
+        }
+        let previous = entry.previous.ok_or("Previous Required to update an entry")?;
+        let current = self.current(slot).await?;
+
+        if previous != current.description {
+            return Err("Previous is out of date".into())
+        }
+
+        let bytes = rmp_serde::encode::to_vec(&entry)?;
+        let bytes = Bytes::from(bytes);
+        self.store.put(&path, bytes).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<Store: ObjectStore> SlotOwnerStore for ObjectStoreProvider<Store> {
+    async fn get_slot_owner(&self, slot: Slot) -> Result<SlotOwner> {
+        log::info!("SlotOwnerStore::get_slot_owner({slot:?}");
+        let path = slot_path(slot);
+        let result = match self.store.get(&path).await {
+            Ok(result) => result,
+            Err(err) => {
+                match err {
+                    object_store::Error::NotFound { path: _, source: _} => {
+                        return Err("Not found".into())
+                    }
+                    _ => return Err(err.into())
+                }
+            }
+        };
+        let bytes = result.bytes().await?;
+        Ok(rmp_serde::decode::from_slice(&bytes[..])?)
+    }
+
+    async fn save_slot_owner(&self, slot: Slot, owner: SlotOwner) -> Result<()> {
+        let path = slot_path(slot);
+        let bytes = rmp_serde::encode::to_vec(&owner)?;
         let bytes = Bytes::from(bytes);
         self.store.put(&path, bytes).await?;
         Ok(())
@@ -85,7 +148,7 @@ fn slot_path(slot: Slot) -> Path {
     let first: String = name.chars().take(2).collect();
     let second: String = name.chars().skip(2).take(2).collect();
     let last: String = name.chars().skip(4).collect();
-    
+
     Path::from(first).child(second).child(last)
 }
 

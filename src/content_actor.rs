@@ -5,7 +5,7 @@ use tokio::io::AsyncWrite;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::content::Description;
+use crate::content::SlotEntry;
 use crate::content_provider::ByteStream;
 use crate::{
     content::{Id, Slot},
@@ -24,11 +24,11 @@ struct ContentActor<Provider: ContentProvider, Store: ContentStore, Slots: SlotH
 enum ContentActorMessage {
     GetSlot {
         slot: Slot,
-        response: oneshot::Sender<Result<Description>>,
+        response: oneshot::Sender<Result<SlotEntry>>,
     },
     UpdateSlot {
         slot: Slot,
-        description: Description,
+        entry: SlotEntry,
         response: oneshot::Sender<Result<()>>,
     },
     GetStream {
@@ -45,7 +45,7 @@ impl std::fmt::Debug for ContentActorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::GetSlot { slot , response : _} => f.write_fmt(format_args!("GetSlot(slot: {slot:?})"))?,
-            Self::UpdateSlot { slot, description , response: _ } => f.write_fmt(format_args!("UpdateSlot(slot: {slot:?}, description: {description:?})"))?,
+            Self::UpdateSlot { slot, entry , response: _ } => f.write_fmt(format_args!("UpdateSlot(slot: {slot:?}, entry: {entry:?})"))?,
             Self::GetStream { id, response: _ } => f.write_fmt(format_args!("GetStream(id: {id:?})"))?,
             Self::Put { id, response: _ } => f.write_fmt(format_args!("Put(id: {id:?})"))?,
         };
@@ -79,10 +79,10 @@ impl<Provider: ContentProvider, Store: ContentStore, Slots: SlotHolder>
             }
             ContentActorMessage::UpdateSlot {
                 slot,
-                description,
+                entry,
                 response,
             } => {
-                let result = self.slots.update(slot, description).await;
+                let result = self.slots.update(slot, entry).await;
                 let _ = response.send(result);
             }
             ContentActorMessage::GetStream { id, response } => {
@@ -137,7 +137,7 @@ impl ContentActorHandle {
         Self { sender }
     }
 
-    pub async fn get_slot(&self, slot: Slot) -> Result<Description> {
+    pub async fn get_slot(&self, slot: Slot) -> Result<SlotEntry> {
         let (send, receive) = oneshot::channel();
         let message = ContentActorMessage::GetSlot {
             slot,
@@ -150,12 +150,12 @@ impl ContentActorHandle {
     pub async fn update_slot(
         &self,
         slot: Slot,
-        description: Description,
+        entry: SlotEntry,
     ) -> Result<()> {
         let (send, receive) = oneshot::channel();
         let message = ContentActorMessage::UpdateSlot {
             slot,
-            description,
+            entry,
             response: send,
         };
         let _ = self.sender.send(message).await;
@@ -166,7 +166,7 @@ impl ContentActorHandle {
         let (send, receive) = oneshot::channel();
         let message = ContentActorMessage::GetStream { id, response: send };
         let _ = self.sender.send(message).await;
-        receive.await.expect("Actor has been killed")   
+        receive.await.expect("Actor has been killed")
     }
 
     pub async fn put(&self, id: Id) -> Result<Box<dyn AsyncWrite + Unpin + Send>> {

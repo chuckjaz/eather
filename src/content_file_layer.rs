@@ -7,7 +7,7 @@ use tokio::{sync::RwLock, io::{AsyncWrite, AsyncWriteExt}};
 use std::{ffi::{OsStr, OsString}, time::SystemTime, collections::{HashMap, HashSet}, sync::Arc};
 use futures::StreamExt;
 
-use crate::{result::Result, content::{Slot, Id, Description, Directory, DirectoryEntry, Content, EntryInformation}, content_actor::ContentActorHandle};
+use crate::{result::Result, content::{Slot, Id, Description, Directory, DirectoryEntry, Content, EntryInformation, SlotOwner, SlotEntry}, content_actor::ContentActorHandle, content_provider::SlotOwnerStore};
 
 pub type Node = u64;
 
@@ -22,19 +22,46 @@ pub trait FileContent {
     async fn read_file(&mut self, node: Node, offset: i64, size: i64) -> Result<Bytes>;
     async fn write_file(&mut self, node: Node, offset: i64, data: &[u8]) -> Result<i64>;
     async fn set_attributes(&mut self, node: Node, executable: bool) -> Result<()>;
-    async fn remove_file(&mut self, parent: Node, name: &OsStr) -> Result<()>; 
+    async fn remove_file(&mut self, parent: Node, name: &OsStr) -> Result<()>;
     async fn allocate_file_space(&mut self, node: Node, offset: i64, size: i64) -> Result<()>;
 
     async fn create_directory(&mut self, parent: Node, name: &OsStr) -> Result<Node>;
     async fn read_directory(&mut self, node: Node, offset: i64, count: i64) -> Result<Vec<LayerDirectoryEntry>>;
     async fn remove_directory(&mut self, parent: Node, name: &OsStr) -> Result<()>;
-    
+
     async fn mount_directory(&mut self, parent: Node, name: &OsStr, slot: Slot) -> Result<()>;
     async fn mount_file(&mut self, parent: Node, name: &OsStr, slot: Slot) -> Result<()>;
     async fn sync(&mut self, node: Node) -> Result<()>;
+
+    fn watch(&mut self, notifier: Box<dyn Notifier + Send + Sync>);
 }
 
-pub fn new(actor: ContentActorHandle, root: Slot) -> impl FileContent {
+#[async_trait]
+pub trait Notifier {
+    async fn notify_invalid(&mut self, node: Node) -> Result<()>;
+}
+
+struct EmptyNotifier { }
+
+#[async_trait]
+impl Notifier for EmptyNotifier {
+    async fn notify_invalid(&mut self, node: Node) -> Result<()> {
+        info!("EmptyNotfifier::notify_invalid {node}");
+        Ok(())
+    }
+}
+
+impl EmptyNotifier {
+    fn new() -> Self {
+        EmptyNotifier {  }
+    }
+}
+
+pub fn new(
+    actor: ContentActorHandle,
+    root: Slot,
+    owner_store: Box<dyn SlotOwnerStore + Send + Sync>,
+) -> impl FileContent {
     let root_info = LayerContentInformation {
         node: ROOT,
         kind: LayerContentKind::Directory,
@@ -45,16 +72,18 @@ pub fn new(actor: ContentActorHandle, root: Slot) -> impl FileContent {
     };
     let mut content: HashMap<Node, LayerContentInformation> = HashMap::new();
     content.insert(ROOT, root_info);
-    let mut mount_points: HashMap<Node, Slot> = HashMap::new();
-    mount_points.insert(ROOT, root);
+    let mut mount_points: HashMap<Node, MountPoint> = HashMap::new();
+    mount_points.insert(ROOT, MountPoint { slot: root, owner: OwnerState::Unchecked, last_read: None });
     FileContentImpl {
         actor,
         content,
         entries: HashMap::new(),
         mount_points,
+        owner_store,
         node_to_parent: HashMap::new(),
         invalid_nodes: HashSet::new(),
         next_node: 2,
+        notifier: Box::new(EmptyNotifier::new()),
     }
 }
 
@@ -143,7 +172,7 @@ pub struct LayerDirectory {
 pub struct LayerContentInformation {
     pub node: Node,
     pub kind: LayerContentKind,
-    pub content: Option<LayerContent>, 
+    pub content: Option<LayerContent>,
     pub mtime: SystemTime,
     pub ttl: SystemTime,
     pub executable: bool,
@@ -158,14 +187,30 @@ impl LayerContentInformation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerState {
+    Unchecked,
+    Owned(SlotOwner),
+    Unowned,
+}
+
+#[derive(Debug)]
+struct MountPoint {
+    slot: Slot,
+    owner: OwnerState,
+    last_read: Option<Description>,
+}
+
 struct FileContentImpl {
     actor: ContentActorHandle,
     content: HashMap<Node, LayerContentInformation>,
     entries: HashMap<Node, Arc<RwLock<LayerDirectory>>>,
-    mount_points: HashMap<Node, Slot>,
+    owner_store: Box<dyn SlotOwnerStore + Send + Sync>,
+    mount_points: HashMap<Node, MountPoint>,
     node_to_parent: HashMap<Node, Node>,
     invalid_nodes: HashSet<Node>,
     next_node: u64,
+    notifier: Box<dyn Notifier + Send + Sync>,
 }
 
 #[async_trait]
@@ -209,7 +254,7 @@ impl FileContent for FileContentImpl {
         let (new_content, new_size) = if offset == content_size {
             let mut vector = if let LayerContent::Composite(vector, _) = content {
                 *vector.clone()
-            } else { 
+            } else {
                 vec![content]
             };
             vector.push(data.into());
@@ -241,6 +286,7 @@ impl FileContent for FileContentImpl {
         };
         let info = self.content.get_mut(&node).unwrap();
         info.content = Some(new_content);
+        self.invalidate_node(node).await?;
         Ok(new_size)
     }
 
@@ -250,7 +296,7 @@ impl FileContent for FileContentImpl {
         if let Some(info) = info {
             if info.executable != executable {
                 info.executable = executable;
-                self.invalid_nodes.insert(node);
+                self.invalidate_node(node).await?;
             }
         } else {
             return Err("Invalid node".into())
@@ -268,7 +314,7 @@ impl FileContent for FileContentImpl {
     }
 
     async fn create_directory(&mut self, parent: Node, name: &OsStr) -> Result<Node> {
-        info!("FileContent::create_directory({parent}, {name:?})");        
+        info!("FileContent::create_directory({parent}, {name:?})");
         self.create_node(parent, name, LayerContentKind::Directory).await
     }
 
@@ -290,7 +336,7 @@ impl FileContent for FileContentImpl {
         info!("FileContent::remove_directory({parent}, {name:?})");
         self.remove_node(parent, name, LayerContentKind::Directory).await
     }
-    
+
     async fn mount_directory(&mut self, parent: Node, name: &OsStr, slot: Slot) -> Result<()> {
         info!("FileContent::mount_directory({parent}, {name:?}, {slot})");
         self.mount_node(parent, name, slot, LayerContentKind::Directory).await
@@ -308,6 +354,10 @@ impl FileContent for FileContentImpl {
         }
         Ok(())
     }
+
+    fn watch(&mut self, notifier: Box<dyn Notifier + Send + Sync>) {
+        self.notifier = notifier;
+    }
 }
 
 trait SomeOrError<T> {
@@ -321,10 +371,10 @@ impl FileContentImpl {
             if info.ttl > now() || self.invalid_nodes.get(&node).is_some() {
                 return Ok(content)
             }
-        } 
-        let slot = self.mount_points.get(&node).unwrap();
-        let description = self.actor.get_slot(*slot).await?;
-        let content: LayerContent = description.into();
+        }
+        let mount_point = self.mount_points.get(&node).unwrap();
+        let entry = self.actor.get_slot(mount_point.slot).await?;
+        let content: LayerContent = entry.description.into();
         let info = self.content.get_mut(&node).unwrap();
         info.content = Some(content.clone());
         info.ttl = slot_time_to_live();
@@ -357,7 +407,7 @@ impl FileContentImpl {
                 DirectoryEntry::Directory(info) => (LayerContentKind::Directory, info)
             };
             let node = self.next_node;
-            self.next_node += 1; 
+            self.next_node += 1;
             let layer_entry = LayerDirectoryEntry {
                 name: info.name.clone(),
                 node,
@@ -368,7 +418,7 @@ impl FileContentImpl {
             let (content, ttl) = match info.content {
                 Content::Described(description) => (Some(description.into()), end_of_time()),
                 Content::Node(slot) => {
-                    self.mount_points.insert(node, slot);
+                    self.mount_points.insert(node, MountPoint { slot, owner: OwnerState::Unchecked, last_read: None });
                     (None, slot_time_to_live())
                 }
             };
@@ -384,7 +434,7 @@ impl FileContentImpl {
         }
         let directory = Arc::new(RwLock::new(LayerDirectory { entries }));
         self.entries.insert(parent, directory.clone());
-        
+
         Ok(directory)
     }
 
@@ -416,8 +466,8 @@ impl FileContentImpl {
             node,
         };
         directory.write().await.entries.insert(name.into(), entry);
-        self.invalid_nodes.insert(node);
-        self.invalid_nodes.insert(parent);
+        self.node_to_parent.insert(node, parent);
+        self.invalidate_node(node).await?;
         Ok(node)
     }
 
@@ -425,7 +475,7 @@ impl FileContentImpl {
         let node = self.create_node(parent, name, kind).await?;
         let info = self.content.get_mut(&node).unwrap();
         info.content = None;
-        self.mount_points.insert(node, slot);
+        self.mount_points.insert(node, MountPoint { slot, owner: OwnerState::Unchecked, last_read: None });
         Ok(())
     }
 
@@ -442,7 +492,7 @@ impl FileContentImpl {
                 self.mount_points.remove(&entry.node);
                 self.content.remove(&entry.node);
                 entries.remove(name);
-                self.invalid_nodes.insert(parent);
+                self.invalidate_node(parent).await?;
                 Ok(())
             }
         } else {
@@ -505,7 +555,7 @@ impl FileContentImpl {
         } else if let LayerContent::Described(description) = content {
             Ok(*description)
         } else {
-            Ok(self.write_content(node, content).await?)     
+            Ok(self.write_content(node, content).await?)
         }
     }
 
@@ -521,12 +571,36 @@ impl FileContentImpl {
         let id = Id::from_sha256(hash.as_ref());
         let mut writer = self.actor.put(id).await?;
         self.write_content_inner(&content, 0, size, &mut writer).await?;
+        writer.shutdown().await?;
         let info = self.content.get_mut(&node).unwrap();
         let description = Description { id, size };
         info.content = Some(description.into());
-        info.ttl = if let Some(slot) = self.mount_points.get(&node) {
-            self.actor.update_slot(*slot, description).await?;
-            slot_time_to_live()
+        info.ttl = if let Some(mount_point) = self.mount_points.get_mut(&node) {
+            let owner = if mount_point.owner == OwnerState::Unchecked {
+                if let Ok(owner) = self.owner_store.get_slot_owner(mount_point.slot).await {
+                    let owner = OwnerState::Owned(owner);
+                    mount_point.owner = owner;
+                    owner
+                } else {
+                    OwnerState::Unowned
+                }
+            } else {
+                mount_point.owner
+            };
+            if let OwnerState::Owned(owner) = owner {
+                let slot = mount_point.slot;
+                let previous = mount_point.last_read;
+                let entry = SlotEntry::signed(description, previous, slot, owner)?;
+                self.actor.update_slot(slot, entry).await?;
+                slot_time_to_live()
+            } else {
+                // Convert this to a directory entry by removing the slot from the table
+                // by removing the slot entry which freezes the directory from the slot.
+                // Consider allowing unmodified files to into changes from the original
+                // slot.
+                self.mount_points.remove(&node);
+                end_of_time()
+            }
         } else {
             end_of_time()
         };
@@ -543,14 +617,14 @@ impl FileContentImpl {
                 return Err("Unknown node".into())
             };
             let layer_directory = layer_directory.read().await;
-    
+
             // produce serialized directory
             let mut directory = Directory { entries: Vec::new() };
 
             for layer_entry in layer_directory.entries.values().into_iter() {
-                let description = self.sync_node(node).await?;
-                let content = if let Some(slot) = self.mount_points.get_mut(&node) {
-                    Content::Node(*slot)
+                let description = self.sync_node(layer_entry.node).await?;
+                let content = if let Some(mount_point) = self.mount_points.get_mut(&node) {
+                    Content::Node(mount_point.slot)
                 } else {
                     Content::Described(description)
                 };
@@ -573,21 +647,24 @@ impl FileContentImpl {
             let info = self.content.get_mut(&node).unwrap();
             info.content = Some(new_content.into());
         }
-         
+
         self.sync_file(node).await
     }
 
     async fn sync_node(&mut self, node: Node) -> Result<Description> {
+        info!("FileContent::sync_node({node})");
         let info = if let Some(info) = self.content.get(&node) {
             info
         } else {
             return Err("Invalid node".into())
         };
-        if info.kind == LayerContentKind::Directory {
+        let result = if info.kind == LayerContentKind::Directory {
             self.sync_directory(node).await
         } else {
             self.sync_file(node).await
-        }
+        };
+        info!("FileContent::sync_node - done");
+        result
     }
 
     #[async_recursion]
@@ -649,7 +726,7 @@ impl FileContentImpl {
                 let mut result_size: i64 = 0;
                 let mut running_offset: i64 = offset;
                 let mut running_size: i64 = size;
-                
+
                 for item in vector.iter() {
                     let (size, actual_size) = self.hash_content(item, running_offset, running_size,  context).await?;
                     result_size += actual_size;
@@ -690,8 +767,8 @@ impl FileContentImpl {
             let bytes = bytes?;
             let len = bytes.len();
             if skip > len {
-                skip -= bytes.len(); 
-                continue 
+                skip -= bytes.len();
+                continue
             }
             let effective = if len > needed { needed } else { len };
             result.put(&bytes[skip..skip + effective]);
@@ -707,6 +784,33 @@ impl FileContentImpl {
         } else {
             Err("Invalid node".into())
         }
+    }
+
+    async fn invalidate_node(&mut self, node: Node) -> Result<()> {
+        info!("FileContentImpl::invalidate_node({node})");
+
+        // Invalidate up to the first mount point or already invalid node.
+        let mut current = node;
+        loop {
+            if self.invalid_nodes.get(&current).is_some() {
+                info!("FileContentImpl::invalidate_node {current} is already invalidated");
+                break;
+            }
+            self.invalid_nodes.insert(current);
+            if self.mount_points.get(&current).is_some() {
+                info!("FileContentImpl::invalidate_node {current} is a mount point");
+                break;
+            }
+            if let Some(parent) = self.node_to_parent.get(&current) {
+                current = *parent;
+            } else {
+                info!("FileContentImpl::invalidate_node {current} has no parent");
+                break;
+            }
+        }
+        self.notifier.notify_invalid(current).await?;
+        info!("FileContentImpl::invalidate_node - done to {current}");
+        Ok(())
     }
 
     fn root_invalid(&self, node: Node) -> Option<Node> {
@@ -762,11 +866,12 @@ mod tests {
         let provider = MemoryProvider::new();
         let store = provider.clone();
         let slots = provider.clone();
+        let owner_store = provider.clone();
         let runtime = new_runtime();
         let actor = ContentActorHandle::new(provider, store, slots, runtime);
         let slot_bytes: [u8; 32] = [0; 32];
         let slot = Slot::ed25519(&slot_bytes);
-        let _ = new(actor, slot);
+        let _ = new(actor, slot, Box::new(owner_store));
     }
 
     #[test]
@@ -782,7 +887,7 @@ mod tests {
     fn can_create_file_and_read_from_it() {
         let runtime = new_runtime();
         runtime.clone().block_on(async {
-            let (mut file_content, _, _) = empty_content(runtime.clone()).await; 
+            let (mut file_content, _, _) = empty_content(runtime.clone()).await;
             let node = assert_ok!(file_content.create_file(ROOT, OsStr::new("name")).await);
             let data = b"This is some test data";
             assert_ok!(file_content.write_file(node, 0, data).await);
@@ -806,7 +911,7 @@ mod tests {
             assert_ok!(file_content.sync(node).await);
             let new_root = assert_ok!(slots.current(root).await);
             let id = assert_ok!(Id::sha256("EgZq8zuXjGnratK8f1JYCy7Yp2g4X6NA2AK48WPLySaR"));
-            assert_eq!(new_root.id, id);
+            assert_eq!(new_root.description.id, id);
         });
     }
 
@@ -817,14 +922,14 @@ mod tests {
         let empty_directory_bytes = assert_ok!(rmp_serde::to_vec(&empty_directory));
         let id = id_of(&empty_directory_bytes.as_ref());
         let size: i64 = assert_ok!(empty_directory_bytes.len().try_into());
-        let mut writer = assert_ok!(store.put(id).await); 
+        let mut writer = assert_ok!(store.put(id).await);
         assert_ok!(writer.write_all(empty_directory_bytes.as_ref()).await);
         assert_ok!(writer.shutdown().await);
         let description = Description {
             id,
             size
         };
-        assert_ok!(slots.update(slot, description).await);
+        assert_ok!(slots.update(slot, crate::content::SlotEntry { description, previous: None, signature: None }).await);
     }
 
     async fn empty_content(runtime: Arc<Runtime>) -> (impl FileContent, Slot, impl SlotHolder) {
@@ -833,11 +938,12 @@ mod tests {
         let store = memory.clone();
         let slots = memory.clone();
         let preload = memory.clone();
+        let owner_store = memory.clone();
         let actor = ContentActorHandle::new(provider, store, slots.clone(), runtime.clone());
         let slot_data: [u8; 32] = [0; 32];
         let slot = Slot::ed25519(&slot_data);
         store_empty_directory(&preload, &preload, slot).await;
-        let file_content = new(actor, slot);
+        let file_content = new(actor, slot, Box::new(owner_store));
         (file_content, slot, slots)
     }
 
@@ -846,7 +952,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-        )        
+        )
     }
 
     fn id_of(bytes: &[u8]) -> Id {
