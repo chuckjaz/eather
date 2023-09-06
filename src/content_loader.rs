@@ -1,14 +1,13 @@
-use std::{ffi::OsString, path::Path, fs::{self, File, DirEntry}, io::{BufReader, Read}, os::unix::prelude::PermissionsExt};
+use std::{path::Path, fs::{self, File, DirEntry}, io::{BufReader, Read}, os::unix::prelude::PermissionsExt};
 use async_recursion::async_recursion;
 use bytes::{Bytes, Buf};
 use ed25519_dalek::Keypair;
-use object_store::local::LocalFileSystem;
 use rand::rngs::OsRng;
 use ring::digest::{Context, SHA256, Digest};
 use log::info;
 use tokio::io::AsyncWriteExt;
 
-use crate::{result::Result, object_store_provider::ObjectStoreProvider, content::{DirectoryEntry, Directory, EntryInformation, Content, Description, Id, Slot, SlotOwner}, content_provider::{ContentStore, SlotHolder}};
+use crate::{result::Result, content::{DirectoryEntry, Directory, EntryInformation, Content, Description, Id, Slot, SlotOwner, SlotEntry}, content_provider::{ContentStore, SlotHolder, SlotOwnerStore}};
 
 async fn directory_of(path: &Path, store: &(impl ContentStore + Sync + Send)) -> Result<Content> {
     let mut entries: Vec<DirectoryEntry> = Vec::new();
@@ -57,11 +56,11 @@ async fn directory_entry_of_entry(entry: &DirEntry, store: &(impl ContentStore +
         writer.shutdown().await?;
         Ok(
             DirectoryEntry::Directory(
-                EntryInformation { 
-                    name, 
-                    modify_time: modify_time.into(), 
+                EntryInformation {
+                    name,
+                    modify_time: modify_time.into(),
                     content,
-                    executable: false, 
+                    executable: false,
                 }
             )
         )
@@ -125,8 +124,9 @@ fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
 async fn slot_of_path(
     path: &Path,
     store: &(impl ContentStore + Sync + Send),
-    slots: &(impl SlotHolder + Sync + Send)
-) -> Result<(Slot, SlotOwner)>{
+    slots: &(impl SlotHolder + Sync + Send),
+    owners: &(impl SlotOwnerStore + Sync + Send)
+) -> Result<Slot>{
     // Store the directory
     let directory_content = directory_of(&path, store).await?;
     let description = if let Content::Described(description) = directory_content {
@@ -136,30 +136,36 @@ async fn slot_of_path(
     };
 
     // Generate the slot
+    let (slot, owner) = new_slot_pair();
+
+    // Sign the entry
+    let entry = SlotEntry::signed(description, None, slot, owner)?;
+
+    // Create the slot in the holder
+    slots.create(slot, entry).await?;
+
+    // Add the owner to the slot owner store
+    owners.save_slot_owner(slot, owner).await?;
+
+    Ok(slot)
+}
+
+pub(crate) fn new_slot_pair() -> (Slot, SlotOwner) {
     let mut csprng = OsRng{};
     let pair = Keypair::generate(&mut csprng);
     let public = pair.public.as_bytes();
     let secret = pair.secret.as_bytes();
     let slot = Slot::ed25519(public);
     let owner = SlotOwner::ed25519(secret);
-
-    // Add the slot into holder
-    slots.update(slot, description).await?;
-
-    Ok((slot, owner))
+    (slot, owner)
 }
 
-pub fn load_directory(config: OsString, path: OsString) -> Result<(Slot, SlotOwner)> {
-    let cache_path = Path::new(&config).join("cache");
-    let file_system = LocalFileSystem::new_with_prefix(cache_path)?;
-    let store = ObjectStoreProvider::new(file_system);
-    let slot_path = Path::new(&config).join("slots");
-    let file_system = LocalFileSystem::new_with_prefix(slot_path)?;
-    let slots = ObjectStoreProvider::new(file_system);
-    let path = Path::new(&path);
-
+pub fn load_directory(
+    store: &(impl ContentStore + Sync + Send),
+    slots: &(impl SlotHolder + Sync + Send),
+    owners: &(impl SlotOwnerStore + Sync + Send),
+    path: &Path
+) -> Result<Slot> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-
-    runtime.block_on(slot_of_path(path, &store, &slots))
+    runtime.block_on(slot_of_path(path, store, slots, owners))
 }
-

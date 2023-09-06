@@ -8,15 +8,16 @@ use ring::digest::{Context, SHA256};
 use tokio::io::AsyncWrite;
 
 use crate::{
-    content::{Id, Description, Slot}, 
-    content_provider::{ContentProvider, ByteStream, ContentStore, SlotHolder}, 
+    content::{Id, Slot, SlotOwner, SlotEntry},
+    content_provider::{ContentProvider, ByteStream, ContentStore, SlotHolder, SlotOwnerStore},
     result::Result
 };
 
 #[derive(Clone)]
 pub struct MemoryProvider {
-    table: Arc<RwLock<HashMap<Id, Vec<Bytes>>>>, 
-    slots: Arc<RwLock<HashMap<Slot, Description>>>,
+    table: Arc<RwLock<HashMap<Id, Vec<Bytes>>>>,
+    slots: Arc<RwLock<HashMap<Slot, SlotEntry>>>,
+    owners: Arc<RwLock<HashMap<Slot, SlotOwner>>>,
 }
 
 impl MemoryProvider {
@@ -25,6 +26,7 @@ impl MemoryProvider {
         Self {
             table: Arc::new(RwLock::new(HashMap::new())),
             slots: Arc::new(RwLock::new(HashMap::new())),
+            owners: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -67,14 +69,14 @@ impl AsyncWrite for Uploader {
     }
 
     fn poll_flush(
-        self: std::pin::Pin<&mut Self>, 
+        self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>
     ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>, 
+        self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>
     ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
         let uploaded_sha = self.hasher.clone().finish();
@@ -101,17 +103,52 @@ impl ContentStore for MemoryProvider {
                 }
             )
         )
-    } 
+    }
 }
 
 #[async_trait]
 impl SlotHolder for MemoryProvider {
-    async fn current(&self, slot: Slot) -> Result<Description> {
-        Ok(*self.slots.read().get(&slot).expect("Unknown slot"))
+    async fn current(&self, slot: Slot) -> Result<SlotEntry> {
+        Ok(self.slots.read().get(&slot).ok_or("Unknown slot")?.clone())
     }
 
-    async fn update(&self, slot: Slot, description: Description) -> Result<()> {
-        self.slots.write().insert(slot, description);
+    async fn create(&self, slot: Slot, entry: SlotEntry) -> Result<()> {
+        entry.validate(slot)?;
+        let mut slots = self.slots.write();
+        if slots.get(&slot).is_some() {
+            return Err("Slot already exists".into());
+        }
+        slots.insert(slot, entry);
+        Ok(())
+    }
+
+    async fn update(&self, slot: Slot, entry: SlotEntry) -> Result<()> {
+        entry.validate(slot)?;
+        let previous = entry.previous.ok_or("Previous value is required to update slot")?;
+        let mut slots = self.slots.write();
+        let current = slots.get(&slot).ok_or("Unknown slot")?;
+        if current.description != previous {
+            return Err("Slot entry is out of date".into())
+        }
+        slots.insert(slot, entry);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SlotOwnerStore for MemoryProvider {
+    async fn get_slot_owner(&self, slot: Slot) -> Result<SlotOwner> {
+        let owners = self.owners.read();
+        if let Some(owner) = owners.get(&slot) {
+            Ok(*owner)
+        } else {
+            Err("No owner for slot".into())
+        }
+    }
+
+    async fn save_slot_owner(&self, slot: Slot, owner: SlotOwner) -> Result<()> {
+        let mut owners = self.owners.write();
+        owners.insert(slot, owner);
         Ok(())
     }
 }
@@ -124,7 +161,7 @@ mod tests {
     use tokio_test::assert_ok;
     use futures::stream::StreamExt;
 
-    use crate::{content::{Id, Slot, Description}, content_provider::{ContentStore, ContentProvider, SlotHolder}};
+    use crate::{content::{Id, Description, SlotEntry}, content_provider::{ContentStore, ContentProvider, SlotHolder}, content_loader::new_slot_pair};
 
     use super::MemoryProvider;
 
@@ -171,9 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn can_update_a_slot() {
-        let slot_bytes: [u8; 32] = [0; 32];
-        let slot = Slot::ed25519(&slot_bytes);
+    fn can_create_a_slot() {
+        let (slot, owner) = new_slot_pair();
         let value = "Some value to add".as_bytes();
         let size: i64 = value.len().try_into().unwrap();
         let id = id_of(value);
@@ -183,14 +219,14 @@ mod tests {
                 id,
                 size
             };
-            assert_ok!(store.update(slot, description).await);
+            let entry = assert_ok!(SlotEntry::signed(description, None, slot, owner));
+            assert_ok!(store.create(slot, entry).await);
         });
     }
 
     #[test]
     fn can_get_current_of_a_slot() {
-        let slot_bytes: [u8; 32] = [0; 32];
-        let slot = Slot::ed25519(&slot_bytes);
+        let (slot, owner) = new_slot_pair();
         let value = "Some value to add".as_bytes();
         let size: i64 = value.len().try_into().unwrap();
         let id = id_of(value);
@@ -200,13 +236,14 @@ mod tests {
                 id,
                 size
             };
-            assert_ok!(store.update(slot, description).await);
+            let entry = assert_ok!(SlotEntry::signed(description, None, slot, owner));
+            assert_ok!(store.create(slot, entry).await);
         });
 
         tokio_test::block_on(async {
-            let description = assert_ok!(store.current(slot).await);
-            assert_eq!(description.id, id);
-            assert_eq!(description.size, size);
+            let entry = assert_ok!(store.current(slot).await);
+            assert_eq!(entry.description.id, id);
+            assert_eq!(entry.description.size, size);
         });
     }
 

@@ -3,7 +3,9 @@ use std::{fmt::{self, Display}, cmp::Ordering};
 use crate::result::Result;
 use base_x::{decode, encode};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Digest, Keypair, PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
+use sha2::Sha512;
 pub type Date = DateTime<Utc>;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
@@ -11,39 +13,14 @@ pub enum Slot {
     Ed25519PublicKey([u8; 32]),
 }
 
-impl std::fmt::Debug for Slot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ed25519PublicKey(key) =>  f.write_fmt(format_args!("PublicKey({})", encode_base58(key)))?
-        };
-        Ok(())
-    }
-}
-
-impl Slot {
-    pub fn ed25519(bytes: &[u8; 32]) -> Slot {
-        Slot::Ed25519PublicKey(*bytes)
-    }
-}
-
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
 pub enum SlotOwner {
     Ed25519PrivateKey([u8; 32]),
 }
 
-impl std::fmt::Debug for SlotOwner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ed25519PrivateKey(key) =>  f.write_fmt(format_args!("PrivateKey({})", encode_base58(key)))?
-        };
-        Ok(())
-    }
-}
-
-impl SlotOwner {
-    pub fn ed25519(bytes: &[u8; 32]) -> SlotOwner {
-        SlotOwner::Ed25519PrivateKey(*bytes)
-    }
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Signature {
+    Ed25519([u8; 32], [u8; 32]),
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
@@ -51,28 +28,7 @@ pub enum Id {
     Sha256([u8; 32]),
 }
 
-impl Id {
-    #[cfg(test)]
-    pub fn sha256(value: &str) -> Result<Self> {
-        let val = decode_base58(value)?;
-        let mut bytes: [u8; 32] = [0; 32];
-        for i in 0..32 {
-            bytes[i] = val[i];
-        }
-        Ok(Self::Sha256(bytes))
-    }
-}
-
-impl std::fmt::Debug for Id {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Sha256(key) =>  f.write_fmt(format_args!("Sha({})", encode_base58(key)))?
-        };
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Description {
     pub id: Id,
     pub size: i64,
@@ -104,6 +60,110 @@ pub enum DirectoryEntry {
     Directory(EntryInformation),
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Directory {
+    pub entries: Vec<DirectoryEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SlotEntry {
+    pub description: Description,
+    pub previous: Option<Description>,
+    pub signature: Option<Signature>,
+}
+
+impl std::fmt::Debug for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519PublicKey(key) =>  f.write_fmt(format_args!("PublicKey({})", encode_base58(key)))?
+        };
+        Ok(())
+    }
+}
+
+impl Slot {
+    pub fn ed25519(bytes: &[u8; 32]) -> Slot {
+        Slot::Ed25519PublicKey(*bytes)
+    }
+}
+
+impl std::fmt::Debug for SlotOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519PrivateKey(key) =>  f.write_fmt(format_args!("PrivateKey({})", encode_base58(key)))?
+        };
+        Ok(())
+    }
+}
+
+impl SlotOwner {
+    pub fn ed25519(bytes: &[u8; 32]) -> Self {
+        SlotOwner::Ed25519PrivateKey(*bytes)
+    }
+
+    #[allow(dead_code)]
+    pub fn owner_string(&self) -> String {
+        encode_base58(match self {
+            SlotOwner::Ed25519PrivateKey(bytes) => bytes
+        })
+    }
+}
+
+impl Signature {
+    pub fn ed25519(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 64 {
+            Err("Invalid size for signature".into())
+        } else {
+            let mut first: [u8; 32] =  [0u8; 32];
+            first.copy_from_slice(&bytes[0..32]);
+            let mut second: [u8; 32] = [0u8; 32];
+            second.copy_from_slice(&bytes[32..]);
+            Ok(Signature::Ed25519(first, second))
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn to_ed25519_signature(&self) -> Result<ed25519_dalek::Signature> {
+        match self {
+            Self::Ed25519(first, second) => {
+                let mut bytes: [u8; 64] = [0u8; 64];
+                bytes[0..32].copy_from_slice(first);
+                bytes[32..].copy_from_slice(second);
+                Ok(ed25519_dalek::Signature::from_bytes(&bytes)?)
+            },
+        }
+    }
+}
+
+impl std::fmt::Debug for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519(first, second) => f.write_fmt(format_args!("Ed25519({}, {})", encode_base58(first), encode_base58(second)))
+        }
+    }
+}
+
+impl Id {
+    #[cfg(test)]
+    pub fn sha256(value: &str) -> Result<Self> {
+        let val = decode_base58(value)?;
+        let mut bytes: [u8; 32] = [0; 32];
+        for i in 0..32 {
+            bytes[i] = val[i];
+        }
+        Ok(Self::Sha256(bytes))
+    }
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sha256(key) =>  f.write_fmt(format_args!("Sha({})", encode_base58(key)))?
+        };
+        Ok(())
+    }
+}
+
 impl DirectoryEntry {
     pub fn info(&self) -> &EntryInformation {
         match self {
@@ -119,11 +179,6 @@ impl DirectoryEntry {
         else if a_info.name == b_info.name { Ordering::Equal }
         else { Ordering::Greater }
     }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Directory {
-    pub entries: Vec<DirectoryEntry>,
 }
 
 impl Id {
@@ -197,6 +252,55 @@ impl Display for Content {
                 f.write_fmt(format_args!("D:{id}({size})"))
             }
         }
+    }
+}
+
+impl SlotEntry {
+    #[allow(dead_code)]
+    pub fn new(description: Description, previous: Option<Description>, signature: Option<Signature>) -> Self {
+        Self { description, previous, signature }
+    }
+
+    pub fn signed(description: Description, previous: Option<Description>, slot: Slot, owner: SlotOwner) -> Result<Self> {
+        let Slot::Ed25519PublicKey(public) = slot;
+        let SlotOwner::Ed25519PrivateKey(private) = owner;
+        let key_pair = Keypair {
+            public: PublicKey::from_bytes(&public)?,
+            secret: SecretKey::from_bytes(&private)?,
+        };
+        let digest = Self::digest(&description, &previous)?;
+        let signature_bytes = key_pair.sign_prehashed(digest, None).unwrap().to_bytes();
+        let signature = Signature::ed25519(&signature_bytes)?;
+        return Ok(Self { description, previous, signature: Some(signature) })
+    }
+
+    #[allow(dead_code)]
+    pub fn validate(&self, slot: Slot) -> Result<()> {
+        let Slot::Ed25519PublicKey(public) = slot;
+        if let Some(signature) = self.signature {
+            let validator = PublicKey::from_bytes(&public)?;
+            let digest = Self::digest(&self.description, &self.previous)?;
+            let ed25519_signature = signature.to_ed25519_signature()?;
+            validator.verify_prehashed(digest, None, &ed25519_signature)?;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn is_valid(&self, slot: Slot) -> bool {
+        match self.validate(slot) {
+            Ok(_) => true,
+            _ => false
+        }
+    }
+
+    fn digest(description: &Description, previous: &Option<Description>) -> Result<Sha512> {
+        let mut digest = Sha512::new();
+        let description_bytes = rmp_serde::encode::to_vec(description)?;
+        let previous_bytes = rmp_serde::encode::to_vec(previous)?;
+        digest.update(description_bytes.as_slice());
+        digest.update(previous_bytes.as_slice());
+        Ok(digest)
     }
 }
 
