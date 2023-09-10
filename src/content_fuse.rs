@@ -2,7 +2,7 @@ use std::{sync::Arc, ffi::OsStr, time::{SystemTime, Duration}};
 use bytes::Bytes;
 use fuser::{Filesystem, FileAttr, FileType, Request, ReplyEntry, ReplyDirectory};
 use libc::ENOENT;
-use log::info;
+use log::debug;
 use tokio::{runtime::Runtime, sync::Mutex};
 
 use crate::{content_file_layer::{FileContent, LayerContentInformation, LayerContentKind, LayerDirectoryEntry}, result::{Result, require}};
@@ -14,7 +14,7 @@ pub struct FileContentFuse {
 
 impl Filesystem for FileContentFuse {
     fn lookup(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        info!("Filesystem::lookup({parent}, {name:?})");
+        debug!("Filesystem::lookup({parent}, {name:?})");
         let runtime = self.runtime.clone();
         let info = runtime.block_on(self.lookup(parent, name));
         match info {
@@ -29,13 +29,43 @@ impl Filesystem for FileContentFuse {
     }
 
     fn getattr(&mut self, req: &Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
-        info!("Filesystem::getattr({ino})");
+        debug!("Filesystem::getattr({ino})");
         let runtime = self.runtime.clone();
         let info = runtime.block_on(self.info(ino));
         match info {
             Ok(info) => {
                 let (attr, ttl) = info_to_file_attr(&info, req);
                 reply.attr(&ttl, &attr)
+            },
+            Err(_) => reply.error(ENOENT)
+        }
+    }
+
+    fn setattr(
+            &mut self,
+            req: &Request<'_>,
+            ino: u64,
+            _mode: Option<u32>,
+            _uid: Option<u32>,
+            _gid: Option<u32>,
+            size: Option<u64>,
+            _atime: Option<fuser::TimeOrNow>,
+            _mtime: Option<fuser::TimeOrNow>,
+            _ctime: Option<SystemTime>,
+            _fh: Option<u64>,
+            _crtime: Option<SystemTime>,
+            _chgtime: Option<SystemTime>,
+            _bkuptime: Option<SystemTime>,
+            flags: Option<u32>,
+            reply: fuser::ReplyAttr,
+        ) {
+        debug!("Filesystem::setattr({ino}, {size:?}, {flags:?}");
+        let runtime = self.runtime.clone();
+        let result = runtime.block_on(self.set_attr(ino, size, flags));
+        match result {
+            Ok(info) => {
+                let (attr, ttl) = info_to_file_attr(&info, req);
+                reply.attr(&ttl, &attr);
             },
             Err(_) => reply.error(ENOENT)
         }
@@ -68,12 +98,12 @@ impl Filesystem for FileContentFuse {
             offset: i64,
             mut reply: ReplyDirectory,
         ) {
-        info!("Filesystem::readdir({ino}, {offset})");
+        debug!("Filesystem::readdir({ino}, {offset})");
         let runtime = self.runtime.clone();
         let result = runtime.block_on(self.readdir(ino, offset));
         match result {
             Ok(vector) => {
-                info!("Filesystem::readdir - {}", vector.len());
+                debug!("Filesystem::readdir - {}", vector.len());
                 let mut off = offset;
                 for entry in vector {
                     let kind = if entry.kind == LayerContentKind::Directory { FileType::Directory } else { FileType::RegularFile };
@@ -100,7 +130,7 @@ impl Filesystem for FileContentFuse {
             _lock_owner: Option<u64>,
             reply: fuser::ReplyWrite,
         ) {
-        info!("Filesystem::write({ino}, {offset})");
+        debug!("Filesystem::write({ino}, {offset})");
         let runtime = self.runtime.clone();
         let result = runtime.block_on(self.write(ino, offset, data));
         match result {
@@ -122,7 +152,7 @@ impl Filesystem for FileContentFuse {
             _rdev: u32,
             reply: ReplyEntry,
         ) {
-        info!("Filesystem::mknod({parent}, {name:?})");
+        debug!("Filesystem::mknod({parent}, {name:?})");
         let runtime = self.runtime.clone();
         let result = runtime.block_on(self.create_file(parent, name));
 
@@ -144,7 +174,7 @@ impl Filesystem for FileContentFuse {
             _umask: u32,
             reply: ReplyEntry,
         ) {
-        info!("Filesystem::mkdir({parent}, {name:?})");
+        debug!("Filesystem::mkdir({parent}, {name:?})");
         let runtime = self.runtime.clone();
         let result = runtime.block_on(self.create_directory(parent, name));
         match result {
@@ -157,7 +187,7 @@ impl Filesystem for FileContentFuse {
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        info!("Filesystem::unlink({parent}, {name:?})");
+        debug!("Filesystem::unlink({parent}, {name:?})");
         let runtime = self.runtime.clone();
         let result = runtime.block_on(self.unlink(parent, name));
         match result {
@@ -167,7 +197,7 @@ impl Filesystem for FileContentFuse {
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        info!("Filesystem::rmdir({parent}, {name:?})");
+        debug!("Filesystem::rmdir({parent}, {name:?})");
         let runtime = self.runtime.clone();
         let result = runtime.block_on(self.rmdir(parent, name));
         match result {
@@ -184,14 +214,25 @@ impl FileContentFuse {
 
     async fn info(&mut self, node: u64) -> Result<LayerContentInformation> {
         let mut content = self.content.lock().await;
-        Ok(content.info(node).await?)
+        content.info(node).await
     }
 
     async fn lookup(&mut self, parent: u64, name: &OsStr) -> Result<LayerContentInformation> {
         let mut content = self.content.lock().await;
         let node = require(content.lookup(parent, name).await?, "Unkonwn name")?;
-        Ok(content.info(node).await?)
+        content.info(node).await
+    }
 
+    async fn set_attr(&mut self, node: u64, size: Option<u64>, flags: Option<u32>) -> Result<LayerContentInformation> {
+        let mut content = self.content.lock().await;
+        if let Some(size) = size {
+            content.set_size(node, size.try_into()?).await?;
+        }
+        if let Some(flags) = flags {
+            let executable = flags & 0o400 != 0;
+            content.set_attributes(node, executable).await?;
+        }
+        content.info(node).await
     }
 
     async fn create_file(&mut self, parent: u64, name: &OsStr) -> Result<LayerContentInformation> {

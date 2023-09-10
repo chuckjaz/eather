@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use content::Id;
+use content_dump::dump_directory;
 use content_file_layer::{Notifier, Node};
 use content_provider::{ContentStore, SlotHolder, SlotOwnerStore, ContentProvider};
 use ed25519_dalek::Keypair;
@@ -25,6 +27,7 @@ use home::home_dir;
 
 mod content;
 mod content_actor;
+mod content_dump;
 mod content_file_layer;
 mod content_fuse;
 mod content_loader;
@@ -90,7 +93,15 @@ enum EatherCommand {
     },
 
     #[command(about = "Generate a slot public/private key pair")]
-    Slot { }
+    Slot { },
+
+    #[command(about = "Dump the content of an Id")]
+    Dump {
+        id: String,
+
+        #[clap(long)]
+        directory: bool,
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -304,6 +315,13 @@ fn load(config_path: &Path, configuration: &Configuration, path: &Path) -> Resul
     load_directory(&store, &slots, &owners, path)
 }
 
+// Dump directory
+fn dump_directory_command(config_path: &Path, configuration: &Configuration, id: &str) -> Result<()> {
+    let provider = provider_from_configuration(config_path, &configuration.provider)?;
+    let id = Id::from_string(id)?;
+    dump_directory(&provider, id)
+}
+
 struct TaskNotifier {
     task_handler: ContentTaskHandle,
 }
@@ -377,6 +395,15 @@ fn main() -> Result<()> {
             let public_str = encode_base58(public);
             let secret_str: String = encode_base58(secret);
             println!("public: {public_str}, secret: {secret_str}");
+            Ok(())
+        },
+        EatherCommand::Dump { id, directory } => {
+            if directory {
+                let configuration = load_configuration(config_path)?;
+                dump_directory_command(config_path, &configuration, &id)?
+            } else {
+                println!("Only directory are supported for now")
+            }
             Ok(())
         }
     }
